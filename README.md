@@ -17,7 +17,8 @@ lines, the last with `"ok"`, and the first to fail stops the build:
 | step | what |
 |---|---|
 | `capture.sh` | builds the ovid named in `OVID_COMMIT` and records what it prints into `captured/`: `ovid help` topics and demo transcripts run in a scratch module |
-| `ovid test`, `ovid build` | tests gen and builds it; the build receipt goes into every page's footer |
+| `ovid test` | runs gen's tests |
+| `ovid build -C prog`, then that compiler's `build` | ovid builds the Ovid compiler written in Ovid (ovid's `prog/`), and that compiler builds gen; its build receipt goes into every page's footer. Go is needed only to build ovid itself |
 | `gen` | renders `content/` into `out/` |
 
 No ovid output on the site is typed by hand. A page includes it with
