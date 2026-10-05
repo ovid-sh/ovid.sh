@@ -1,0 +1,365 @@
+package gen
+
+import ovid/io
+import ovid/mem
+import md
+import text
+
+// gen builds ovid.sh. Run from the repository root after capture.sh, it
+// reads content/pages.txt and content/<name>.md and writes out/: each page
+// as <name>.html and <name>.md, llms.txt, llms-full.txt, site.jsonl, and
+// style.css. Like ovid, it prints JSON lines, the last with "ok"; an error
+// in a page is a record with file, line, col, and source, and nothing is
+// written.
+
+// Page is one line of content/pages.txt, "name label" (no label: not in
+// the nav), and what its file rendered to.
+type Page struct {
+  name i64
+  namen i64
+  label i64
+  labeln i64
+  doc *md.Doc
+  hash i64
+  next *Page
+}
+
+type Site struct {
+  first *Page
+  count i64
+  commit *text.Span
+  receipt *text.Span
+}
+
+func main(io *ovid/io.Cap) i64 {
+  var s *Site = ovid/io.Alloc(io, sizeof(Site)) as *Site
+  s.commit = need(io, strptr("captured/ovid-commit.txt"))
+  s.receipt = need(io, strptr("captured/gen-build.jsonl"))
+  var list *text.Span = need(io, strptr("content/pages.txt"))
+  if s.commit.n < 0 || s.receipt.n < 0 || list.n < 0 {
+    return 1
+  }
+  s.commit.n = text.Trail(s.commit.p, s.commit.n)
+  s.receipt.n = text.Trail(s.receipt.p, s.receipt.n)
+  pages(io, s, list)
+  var errors i64 = 0
+  var pg *Page = s.first
+  var i i64 = 0
+  while i < s.count {
+    errors = errors + load(io, pg)
+    pg = pg.next
+    i = i + 1
+  }
+  if errors > 0 {
+    var b *ovid/mem.Buf = ovid/mem.New(io, 64)
+    text.S(io, b, strptr("{\"errors\":"))
+    text.Int(io, b, errors)
+    text.S(io, b, strptr(",\"ok\":false}\n"))
+    ovid/io.Stdout(b.data, b.len)
+    return 1
+  }
+  ovid/io.Mkdir(strptr("out"))
+  pg = s.first
+  i = 0
+  while i < s.count {
+    errors = errors + write(io, s, pg)
+    pg = pg.next
+    i = i + 1
+  }
+  errors = errors + indexes(io, s)
+  var css *text.Span = need(io, strptr("static/style.css"))
+  if css.n < 0 {
+    return 1
+  }
+  errors = errors + put(io, strptr("out/style.css"), css.p, css.n)
+  var r *ovid/mem.Buf = ovid/mem.New(io, 128)
+  text.S(io, r, strptr("{\"ok\":"))
+  if errors == 0 {
+    text.S(io, r, strptr("true"))
+  } else {
+    text.S(io, r, strptr("false"))
+  }
+  text.S(io, r, strptr(",\"out\":\"out\",\"ovid\":\""))
+  ovid/mem.WBytes(io, r, s.commit.p, s.commit.n)
+  text.S(io, r, strptr("\",\"pages\":"))
+  text.Int(io, r, s.count)
+  text.S(io, r, strptr("}\n"))
+  ovid/io.Stdout(r.data, r.len)
+  if errors != 0 {
+    return 1
+  }
+  return 0
+}
+
+// need reads the file at the NUL-terminated path, or prints why it cannot.
+func need(io *ovid/io.Cap, path i64) *text.Span {
+  var f *text.Span = text.ReadFile(io, path, ovid/io.CLen(path))
+  if f.n < 0 {
+    var b *ovid/mem.Buf = ovid/mem.New(io, 128)
+    text.S(io, b, strptr("{\"error\":\"not_found\",\"file\":\""))
+    text.S(io, b, path)
+    text.S(io, b, strptr("\",\"hint\":\"run gen from the repository root, after capture.sh\",\"ok\":false}\n"))
+    ovid/io.Stdout(b.data, b.len)
+  }
+  return f
+}
+
+// put writes n bytes at p to the NUL-terminated path, or prints why not.
+func put(io *ovid/io.Cap, path i64, p i64, n i64) i64 {
+  return putn(io, path, ovid/io.CLen(path), p, n)
+}
+
+func putn(io *ovid/io.Cap, path i64, pathn i64, p i64, n i64) i64 {
+  if ovid/io.WriteFileAtomic(io, path, pathn, p, n, 420) == 0 {
+    return 0
+  }
+  var b *ovid/mem.Buf = ovid/mem.New(io, 128)
+  text.S(io, b, strptr("{\"error\":\"write\",\"file\":\""))
+  text.Json(io, b, path, pathn)
+  text.S(io, b, strptr("\",\"ok\":false}\n"))
+  ovid/io.Stdout(b.data, b.len)
+  return 1
+}
+
+// pages reads the list of pages: one "name label" a line; # starts a
+// comment.
+func pages(io *ovid/io.Cap, s *Site, f *text.Span) i64 {
+  var last *Page = s.first
+  var i i64 = 0
+  while i < f.n {
+    var e i64 = text.LineEnd(f.p, f.n, i)
+    var p i64 = f.p + i
+    var n i64 = text.Trail(p, e - i)
+    if n > 0 && load8(p) != text.HASH {
+      var pg *Page = ovid/io.Alloc(io, sizeof(Page)) as *Page
+      pg.name = p
+      pg.namen = text.Find(p, n, 0, text.SP)
+      if pg.namen < 0 {
+        pg.namen = n
+      } else {
+        pg.label = (p + pg.namen) + 1
+        pg.labeln = (n - pg.namen) - 1
+      }
+      if s.count == 0 {
+        s.first = pg
+      } else {
+        last.next = pg
+      }
+      last = pg
+      s.count = s.count + 1
+    }
+    i = e + 1
+  }
+  return 0
+}
+
+// file is content/<name>.md.
+func file(io *ovid/io.Cap, pg *Page) *ovid/mem.Buf {
+  var b *ovid/mem.Buf = ovid/mem.New(io, 64)
+  text.S(io, b, strptr("content/"))
+  ovid/mem.WBytes(io, b, pg.name, pg.namen)
+  text.S(io, b, strptr(".md"))
+  return b
+}
+
+// load reads and renders a page; on an error it prints a diagnostic and
+// returns 1.
+func load(io *ovid/io.Cap, pg *Page) i64 {
+  var path *ovid/mem.Buf = file(io, pg)
+  var f *text.Span = text.ReadFile(io, path.data, path.len)
+  var b *ovid/mem.Buf = ovid/mem.New(io, 256)
+  if f.n < 0 {
+    text.S(io, b, strptr("{\"fact\":\"error\",\"code\":\"not_found\",\"message\":\"content/pages.txt names a page with no file\",\"file\":\""))
+    text.Json(io, b, path.data, path.len)
+    text.S(io, b, strptr("\"}\n"))
+    ovid/io.Stdout(b.data, b.len)
+    return 1
+  }
+  pg.doc = md.New(io, f.p, f.n)
+  if md.Render(io, pg.doc) == 0 {
+    pg.hash = text.Hash(pg.doc.md.data, pg.doc.md.len)
+    return 0
+  }
+  diag(io, b, pg.doc, path)
+  ovid/io.Stdout(b.data, b.len)
+  return 1
+}
+
+// diag writes d's error as a JSON line, the way ovid check reports one.
+func diag(io *ovid/io.Cap, b *ovid/mem.Buf, d *md.Doc, path *ovid/mem.Buf) i64 {
+  var line i64 = 1
+  var start i64 = 0
+  var i i64 = 0
+  while i < d.at {
+    if load8(d.src + i) == text.NL {
+      line = line + 1
+      start = i + 1
+    }
+    i = i + 1
+  }
+  var e i64 = text.LineEnd(d.src, d.n, start)
+  text.S(io, b, strptr("{\"fact\":\"error\",\"code\":\""))
+  text.S(io, b, d.err)
+  text.S(io, b, strptr("\",\"message\":\""))
+  text.Json(io, b, d.msg.data, d.msg.len)
+  text.S(io, b, strptr("\",\"file\":\""))
+  text.Json(io, b, path.data, path.len)
+  text.S(io, b, strptr("\",\"line\":"))
+  text.Int(io, b, line)
+  text.S(io, b, strptr(",\"col\":"))
+  text.Int(io, b, (d.at - start) + 1)
+  text.S(io, b, strptr(",\"source\":\""))
+  text.Json(io, b, d.src + start, text.Trail(d.src + start, e - start))
+  text.S(io, b, strptr("\",\"hint\":\"README.md lists the Markdown gen reads\"}\n"))
+  return 0
+}
+
+// index is true for the home page, whose URL is /.
+func index(pg *Page) bool {
+  return text.Is(pg.name, pg.namen, strptr("index"), 5)
+}
+
+// url appends the page's path: / or /name.
+func url(io *ovid/io.Cap, b *ovid/mem.Buf, pg *Page) i64 {
+  ovid/mem.WByte(io, b, text.SLASH)
+  if !index(pg) {
+    ovid/mem.WBytes(io, b, pg.name, pg.namen)
+  }
+  return 0
+}
+
+// mdurl appends the path of the page's Markdown: /name.md.
+func mdurl(io *ovid/io.Cap, b *ovid/mem.Buf, pg *Page) i64 {
+  ovid/mem.WByte(io, b, text.SLASH)
+  ovid/mem.WBytes(io, b, pg.name, pg.namen)
+  return text.S(io, b, strptr(".md"))
+}
+
+// record appends the page's JSON record, the one site.jsonl lists and the
+// footer shows.
+func record(io *ovid/io.Cap, s *Site, b *ovid/mem.Buf, pg *Page) i64 {
+  text.S(io, b, strptr("{\"page\":\""))
+  url(io, b, pg)
+  text.S(io, b, strptr("\",\"md\":\""))
+  mdurl(io, b, pg)
+  text.S(io, b, strptr("\",\"title\":\""))
+  text.Json(io, b, pg.doc.title.data, pg.doc.title.len)
+  text.S(io, b, strptr("\",\"hash\":\""))
+  text.Hex(io, b, pg.hash, 12)
+  text.S(io, b, strptr("\",\"ovid\":\""))
+  ovid/mem.WBytes(io, b, s.commit.p, 12)
+  return text.S(io, b, strptr("\",\"ok\":true}"))
+}
+
+// write writes out/<name>.html and out/<name>.md.
+func write(io *ovid/io.Cap, s *Site, pg *Page) i64 {
+  var d *md.Doc = pg.doc
+  var h *ovid/mem.Buf = ovid/mem.New(io, d.html.len + 4096)
+  text.S(io, h, strptr("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>"))
+  text.Html(io, h, d.title.data, d.title.len)
+  if !index(pg) {
+    text.S(io, h, strptr(" · Ovid"))
+  }
+  text.S(io, h, strptr("</title>\n<meta name=\"description\" content=\""))
+  text.Html(io, h, d.desc.data, d.desc.len)
+  text.S(io, h, strptr("\">\n<meta name=\"generator\" content=\"gen, written in Ovid\">\n<link rel=\"stylesheet\" href=\"/style.css\">\n<link rel=\"alternate\" type=\"text/markdown\" href=\""))
+  mdurl(io, h, pg)
+  text.S(io, h, strptr("\">\n</head>\n<body>\n<header class=\"site\">\n<a class=\"brand\" href=\"/\">Ovid</a>\n<nav>"))
+  var o *Page = s.first
+  var i i64 = 0
+  while i < s.count {
+    if o.labeln > 0 {
+      text.S(io, h, strptr("<a href=\""))
+      url(io, h, o)
+      if o == pg {
+        text.S(io, h, strptr("\" aria-current=\"page"))
+      }
+      text.S(io, h, strptr("\">"))
+      text.Html(io, h, o.label, o.labeln)
+      text.S(io, h, strptr("</a>"))
+    }
+    o = o.next
+    i = i + 1
+  }
+  text.S(io, h, strptr("</nav>\n<a class=\"twin\" href=\""))
+  mdurl(io, h, pg)
+  text.S(io, h, strptr("\" title=\"This page as Markdown\">.md</a>\n</header>\n<main>\n"))
+  ovid/mem.WBytes(io, h, d.html.data, d.html.len)
+  text.S(io, h, strptr("</main>\n<footer>\n<pre class=\"lang-jsonl\"><code>"))
+  var rec *ovid/mem.Buf = ovid/mem.New(io, 256)
+  record(io, s, rec, pg)
+  md.Json(io, h, rec.data, rec.len)
+  text.S(io, h, strptr("</code></pre>\n<p>This page is also <a href=\""))
+  mdurl(io, h, pg)
+  text.S(io, h, strptr("\">Markdown</a>. The whole site is <a href=\"/llms-full.txt\">one text file</a>, indexed in <a href=\"/llms.txt\">llms.txt</a> and <a href=\"/site.jsonl\">site.jsonl</a>. It was generated by <a href=\"https://github.com/ovid-sh/ovid.sh\">gen</a>, a program written in Ovid, built by ovid <a href=\"https://github.com/ovid-sh/ovid/commit/"))
+  ovid/mem.WBytes(io, h, s.commit.p, s.commit.n)
+  text.S(io, h, strptr("\">"))
+  ovid/mem.WBytes(io, h, s.commit.p, 12)
+  text.S(io, h, strptr("</a>, which said:</p>\n<pre class=\"lang-jsonl\"><code>"))
+  md.Json(io, h, s.receipt.p, s.receipt.n)
+  text.S(io, h, strptr("</code></pre>\n</footer>\n</body>\n</html>\n"))
+
+  var path *ovid/mem.Buf = ovid/mem.New(io, 64)
+  text.S(io, path, strptr("out/"))
+  ovid/mem.WBytes(io, path, pg.name, pg.namen)
+  var stem i64 = path.len
+  text.S(io, path, strptr(".html"))
+  var bad i64 = putn(io, path.data, path.len, h.data, h.len)
+  path.len = stem
+  text.S(io, path, strptr(".md"))
+  bad = bad + putn(io, path.data, path.len, d.md.data, d.md.len)
+
+  rec.len = 0
+  text.S(io, rec, strptr("{\"bytes\":"))
+  text.Int(io, rec, h.len)
+  text.S(io, rec, strptr(",\"fact\":\"page\",\"file\":\"out/"))
+  ovid/mem.WBytes(io, rec, pg.name, pg.namen)
+  text.S(io, rec, strptr(".html\",\"hash\":\""))
+  text.Hex(io, rec, pg.hash, 12)
+  text.S(io, rec, strptr("\"}\n"))
+  ovid/io.Stdout(rec.data, rec.len)
+  return bad
+}
+
+// indexes writes llms.txt, llms-full.txt, and site.jsonl.
+func indexes(io *ovid/io.Cap, s *Site) i64 {
+  var home *md.Doc = s.first.doc
+  var l *ovid/mem.Buf = ovid/mem.New(io, 4096)
+  var full *ovid/mem.Buf = ovid/mem.New(io, 65536)
+  var j *ovid/mem.Buf = ovid/mem.New(io, 4096)
+  text.S(io, l, strptr("# Ovid\n\n> "))
+  ovid/mem.WBytes(io, l, home.desc.data, home.desc.len)
+  text.S(io, l, strptr("\n\nEvery page of https://ovid.sh is also Markdown, at the URLs below. /llms-full.txt is all of them in one file. /site.jsonl lists them as JSON lines with a hash of each, so an agent can tell what changed; its last line has \"ok\".\n\n## Pages\n\n"))
+  var pg *Page = s.first
+  var i i64 = 0
+  while i < s.count {
+    text.S(io, l, strptr("- ["))
+    ovid/mem.WBytes(io, l, pg.doc.title.data, pg.doc.title.len)
+    text.S(io, l, strptr("](https://ovid.sh"))
+    mdurl(io, l, pg)
+    text.S(io, l, strptr("): "))
+    ovid/mem.WBytes(io, l, pg.doc.desc.data, pg.doc.desc.len)
+    text.S(io, l, strptr("\n"))
+    if i > 0 {
+      text.S(io, full, strptr("\n\n"))
+    }
+    text.S(io, full, strptr("<!-- https://ovid.sh"))
+    url(io, full, pg)
+    text.S(io, full, strptr(" -->\n\n"))
+    ovid/mem.WBytes(io, full, pg.doc.md.data, pg.doc.md.len)
+    record(io, s, j, pg)
+    text.S(io, j, strptr("\n"))
+    pg = pg.next
+    i = i + 1
+  }
+  text.S(io, j, strptr("{\"hash\":\""))
+  text.Hex(io, j, text.Hash(full.data, full.len), 12)
+  text.S(io, j, strptr("\",\"ok\":true,\"ovid\":\""))
+  ovid/mem.WBytes(io, j, s.commit.p, s.commit.n)
+  text.S(io, j, strptr("\",\"pages\":"))
+  text.Int(io, j, s.count)
+  text.S(io, j, strptr("}\n"))
+  var bad i64 = put(io, strptr("out/llms.txt"), l.data, l.len)
+  bad = bad + put(io, strptr("out/llms-full.txt"), full.data, full.len)
+  return bad + put(io, strptr("out/site.jsonl"), j.data, j.len)
+}

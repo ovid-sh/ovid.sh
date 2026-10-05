@@ -1,0 +1,8 @@
+# One page a line: its name (content/<name>.md) and its label in the nav;
+# a page with no label is not in the nav. The first line is the home page.
+index
+start Start
+language Language
+commands Commands
+edits Edits
+roadmap Roadmap

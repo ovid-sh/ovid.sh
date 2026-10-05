@@ -1,0 +1,241 @@
+package text
+
+import ovid/io
+import ovid/mem
+
+// Byte values the parsers compare against: Ovid has no char literals.
+const TAB i64 = 9
+const NL i64 = 10
+const CR i64 = 13
+const SP i64 = 32
+const DQ i64 = 34
+const HASH i64 = 35
+const DOLLAR i64 = 36
+const AMP i64 = 38
+const LPAR i64 = 40
+const RPAR i64 = 41
+const STAR i64 = 42
+const PLUS i64 = 43
+const DASH i64 = 45
+const DOT i64 = 46
+const SLASH i64 = 47
+const COLON i64 = 58
+const LT i64 = 60
+const EQ i64 = 61
+const GT i64 = 62
+const LBR i64 = 91
+const BSL i64 = 92
+const RBR i64 = 93
+const UND i64 = 95
+const BQ i64 = 96
+const LBRACE i64 = 123
+const PIPE i64 = 124
+
+// Span is n bytes at p; a failed read has n < 0.
+type Span struct {
+  p i64
+  n i64
+}
+
+// S appends the NUL-terminated string at p: S(io, b, strptr("<p>")).
+func S(io *ovid/io.Cap, b *ovid/mem.Buf, p i64) i64 {
+  return ovid/mem.WBytes(io, b, p, ovid/io.CLen(p))
+}
+
+// Esc appends the byte c, escaped for HTML text or an attribute value.
+func Esc(io *ovid/io.Cap, b *ovid/mem.Buf, c i64) i64 {
+  if c == AMP {
+    return S(io, b, strptr("&amp;"))
+  } else if c == LT {
+    return S(io, b, strptr("&lt;"))
+  } else if c == GT {
+    return S(io, b, strptr("&gt;"))
+  } else if c == DQ {
+    return S(io, b, strptr("&quot;"))
+  }
+  return ovid/mem.WByte(io, b, c)
+}
+
+// Html appends n bytes at p, escaped for HTML.
+func Html(io *ovid/io.Cap, b *ovid/mem.Buf, p i64, n i64) i64 {
+  var i i64 = 0
+  while i < n {
+    Esc(io, b, load8(p + i))
+    i = i + 1
+  }
+  return 0
+}
+
+// Json appends n bytes at p as the inside of a JSON string.
+func Json(io *ovid/io.Cap, b *ovid/mem.Buf, p i64, n i64) i64 {
+  var i i64 = 0
+  while i < n {
+    var c i64 = load8(p + i)
+    if c == DQ {
+      S(io, b, strptr("\\\""))
+    } else if c == BSL {
+      S(io, b, strptr("\\\\"))
+    } else if c == NL {
+      S(io, b, strptr("\\n"))
+    } else if c == TAB {
+      S(io, b, strptr("\\t"))
+    } else if c == CR {
+      S(io, b, strptr("\\r"))
+    } else if c < SP {
+      S(io, b, strptr("\\u"))
+      Hex(io, b, c, 4)
+    } else {
+      ovid/mem.WByte(io, b, c)
+    }
+    i = i + 1
+  }
+  return 0
+}
+
+// Hex appends the low width nibbles of v in lowercase hex.
+func Hex(io *ovid/io.Cap, b *ovid/mem.Buf, v i64, width i64) i64 {
+  ovid/mem.Grow(io, b, width)
+  ovid/mem.HexOut(b.data + b.len, v, width)
+  b.len = b.len + width
+  return 0
+}
+
+// Int appends v in decimal.
+func Int(io *ovid/io.Cap, b *ovid/mem.Buf, v i64) i64 {
+  ovid/mem.Grow(io, b, 52)
+  b.len = b.len + ovid/mem.FormatI64(b.data + b.len, v)
+  return 0
+}
+
+// Hash is 64-bit FNV-1a over n bytes at p.
+func Hash(p i64, n i64) i64 {
+  // 0xcbf29ce484222325, the FNV offset basis, as a signed i64.
+  var h i64 = -3750763034362895579
+  var i i64 = 0
+  while i < n {
+    h = (h ^ load8(p + i)) * 1099511628211
+    i = i + 1
+  }
+  return h
+}
+
+func Digit(c i64) bool {
+  return c >= 48 && c <= 57
+}
+
+// Alpha is true for an ASCII letter or _.
+func Alpha(c i64) bool {
+  return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == UND
+}
+
+// Slug appends an HTML id for n bytes of plain text at p: lowercase
+// letters and digits, each run of anything else one dash, none at the ends.
+func Slug(io *ovid/io.Cap, b *ovid/mem.Buf, p i64, n i64) i64 {
+  var start i64 = b.len
+  var dash bool = false
+  var i i64 = 0
+  while i < n {
+    var c i64 = load8(p + i)
+    if c >= 65 && c <= 90 {
+      c = c + 32
+    }
+    if Digit(c) || (c >= 97 && c <= 122) {
+      if dash && b.len > start {
+        ovid/mem.WByte(io, b, DASH)
+      }
+      dash = false
+      ovid/mem.WByte(io, b, c)
+    } else {
+      dash = true
+    }
+    i = i + 1
+  }
+  return 0
+}
+
+// LineEnd is the offset of the newline ending the line that starts at i
+// in the n bytes at p, or n.
+func LineEnd(p i64, n i64, i i64) i64 {
+  while i < n && load8(p + i) != NL {
+    i = i + 1
+  }
+  return i
+}
+
+// Blank is true when the n bytes at p are only spaces, tabs, and CRs.
+func Blank(p i64, n i64) bool {
+  var i i64 = 0
+  var c i64 = 0
+  while i < n {
+    c = load8(p + i)
+    if c != SP && c != TAB && c != CR {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+// Prefix is true when the n bytes at p start with the litn bytes at lit.
+func Prefix(p i64, n i64, lit i64, litn i64) bool {
+  if n < litn {
+    return false
+  }
+  return ovid/mem.Eq(p, litn, lit, litn)
+}
+
+// Is is true when the n bytes at p are the litn bytes at lit.
+func Is(p i64, n i64, lit i64, litn i64) bool {
+  return ovid/mem.Eq(p, n, lit, litn)
+}
+
+// Find is the offset of the first byte c in the n bytes at p from offset
+// i on, or -1.
+func Find(p i64, n i64, i i64, c i64) i64 {
+  while i < n {
+    if load8(p + i) == c {
+      return i
+    }
+    i = i + 1
+  }
+  return -1
+}
+
+// Lead is how many spaces the n bytes at p start with.
+func Lead(p i64, n i64) i64 {
+  var i i64 = 0
+  while i < n && load8(p + i) == SP {
+    i = i + 1
+  }
+  return i
+}
+
+// Trail is n less the spaces, tabs, CRs, and newlines the bytes end with.
+func Trail(p i64, n i64) i64 {
+  var c i64 = 0
+  var more bool = n > 0
+  while more {
+    c = load8((p + n) - 1)
+    if c == SP || c == TAB || c == CR || c == NL {
+      n = n - 1
+      more = n > 0
+    } else {
+      more = false
+    }
+  }
+  return n
+}
+
+// ReadFile reads the file named by pathn bytes at path.
+func ReadFile(io *ovid/io.Cap, path i64, pathn i64) *Span {
+  var s *Span = ovid/io.Alloc(io, sizeof(Span)) as *Span
+  var pp i64 = ovid/io.Alloc(io, 8)
+  var nn i64 = ovid/io.Alloc(io, 8)
+  if ovid/io.ReadFile(io, path, pathn, pp, nn) != 0 {
+    s.n = -1
+    return s
+  }
+  s.p = load64(pp)
+  s.n = load64(nn)
+  return s
+}

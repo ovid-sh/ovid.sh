@@ -1,0 +1,91 @@
+package md
+
+import ovid/io
+import ovid/mem
+import ovid/test
+
+// render renders the litn bytes at lit; it fails the test on an error.
+func render(io *ovid/io.Cap, lit i64, litn i64) *Doc {
+  var src i64 = ovid/io.Alloc(io, litn + 1)
+  ovid/mem.Copy(src, lit, litn)
+  var d *Doc = New(io, src, litn)
+  Render(io, d)
+  return d
+}
+
+// html is 0 when d rendered to the wantn bytes at want; else it prints
+// what it got.
+func html(d *Doc, want i64, wantn i64) i64 {
+  if d.err != 0 {
+    ovid/io.Eprint(d.err)
+    ovid/io.Eprint(strptr(": "))
+    ovid/io.Stderr(d.msg.data, d.msg.len)
+    ovid/io.Eprint(strptr("\n"))
+    return 1
+  }
+  if ovid/mem.Eq(d.html.data, d.html.len, want, wantn) {
+    return 0
+  }
+  ovid/io.Eprint(strptr("got:\n"))
+  ovid/io.Stderr(d.html.data, d.html.len)
+  return 1
+}
+
+func TestHeadingPara(io *ovid/io.Cap) i64 {
+  var d *Doc = render(io, strptr("# The `ovid` CLI\n\nIt **answers** in [JSON](/protocol)\nlines.\n"), strlen("# The `ovid` CLI\n\nIt **answers** in [JSON](/protocol)\nlines.\n"))
+  if html(d, strptr("<h1 id=\"the-ovid-cli\">The <code>ovid</code> CLI</h1>\n<p>It <strong>answers</strong> in <a href=\"/protocol\">JSON</a>\nlines.</p>\n"), strlen("<h1 id=\"the-ovid-cli\">The <code>ovid</code> CLI</h1>\n<p>It <strong>answers</strong> in <a href=\"/protocol\">JSON</a>\nlines.</p>\n")) != 0 {
+    return 1
+  }
+  if !ovid/test.True(ovid/mem.Eq(d.title.data, d.title.len, strptr("The ovid CLI"), strlen("The ovid CLI")), strptr("title")) {
+    return 2
+  }
+  if !ovid/test.True(ovid/mem.Eq(d.desc.data, d.desc.len, strptr("It answers in JSON lines."), strlen("It answers in JSON lines.")), strptr("desc")) {
+    return 3
+  }
+  return 0
+}
+
+func TestListTable(io *ovid/io.Cap) i64 {
+  var d *Doc = render(io, strptr("# T\n- one\n  more\n- `a\\|b`\n\n| a | b |\n|---|---|\n| <x> | |\n"), strlen("# T\n- one\n  more\n- `a\\|b`\n\n| a | b |\n|---|---|\n| <x> | |\n"))
+  return html(d, strptr("<h1 id=\"t\">T</h1>\n<ul>\n<li>one\n  more</li>\n<li><code>a|b</code></li>\n</ul>\n<div class=\"table\"><table>\n<thead><tr><th>a</th><th>b</th></tr></thead>\n<tbody>\n<tr><td>&lt;x&gt;</td><td></td></tr>\n</tbody></table></div>\n"), strlen("<h1 id=\"t\">T</h1>\n<ul>\n<li>one\n  more</li>\n<li><code>a|b</code></li>\n</ul>\n<div class=\"table\"><table>\n<thead><tr><th>a</th><th>b</th></tr></thead>\n<tbody>\n<tr><td>&lt;x&gt;</td><td></td></tr>\n</tbody></table></div>\n"))
+}
+
+func TestFenceJson(io *ovid/io.Cap) i64 {
+  var d *Doc = render(io, strptr("# T\n```jsonl\n{\"ok\":true,\"n\":-1}\n```\n"), strlen("# T\n```jsonl\n{\"ok\":true,\"n\":-1}\n```\n"))
+  return html(d, strptr("<h1 id=\"t\">T</h1>\n<pre class=\"lang-jsonl\"><code>{<span class=\"k\">&quot;ok&quot;</span>:<span class=\"ok\">true</span>,<span class=\"k\">&quot;n&quot;</span>:<span class=\"n\">-1</span>}</code></pre>\n"), strlen("<h1 id=\"t\">T</h1>\n<pre class=\"lang-jsonl\"><code>{<span class=\"k\">&quot;ok&quot;</span>:<span class=\"ok\">true</span>,<span class=\"k\">&quot;n&quot;</span>:<span class=\"n\">-1</span>}</code></pre>\n"))
+}
+
+// fails is 0 when the litn bytes at lit fail with code at offset at.
+func fails(io *ovid/io.Cap, lit i64, litn i64, code i64, at i64) i64 {
+  var d *Doc = render(io, lit, litn)
+  if d.err == 0 {
+    ovid/io.Eprint(strptr("no error\n"))
+    return 1
+  }
+  if !ovid/test.True(ovid/mem.EqC(d.err, code, ovid/io.CLen(code)), d.err) {
+    return 2
+  }
+  if !ovid/test.Eq(io, d.at, at) {
+    return 3
+  }
+  return 0
+}
+
+func TestErrors(io *ovid/io.Cap) i64 {
+  if fails(io, strptr("# T\n```ov\nx\n"), strlen("# T\n```ov\nx\n"), strptr("unclosed_fence"), 4) != 0 {
+    return 1
+  }
+  if fails(io, strptr("# T\n\n> no\n"), strlen("# T\n\n> no\n"), strptr("unsupported_markdown"), 5) != 0 {
+    return 2
+  }
+  if fails(io, strptr("# T\nan `open\n"), strlen("# T\nan `open\n"), strptr("unclosed_code"), 7) != 0 {
+    return 3
+  }
+  if fails(io, strptr("text\n"), strlen("text\n"), strptr("no_title"), 0) != 0 {
+    return 4
+  }
+  if fails(io, strptr("# T\n```text include=nope.txt\n```\n"), strlen("# T\n```text include=nope.txt\n```\n"), strptr("include_not_found"), 20) != 0 {
+    return 5
+  }
+  return 0
+}

@@ -1,0 +1,125 @@
+/* ovid.sh: one stylesheet, no scripts. The page is mostly monospace,
+   because most of what it shows is what a terminal shows. */
+
+:root {
+  --bg: #fbfaf7;
+  --fg: #1d1c1a;
+  --dim: #6b6862;
+  --rule: #e4e1da;
+  --code-bg: #f3f1ec;
+  --accent: #8a3b12;
+  --k: #1f4e79;
+  --s: #3f6b2a;
+  --n: #8a3b12;
+  --ok: #1f7a3a;
+  --bad: #b3261e;
+  --cm: #8a867e;
+  --mono: ui-monospace, "JetBrains Mono", "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141412;
+    --fg: #e6e3dc;
+    --dim: #9a968d;
+    --rule: #2c2b28;
+    --code-bg: #1c1c19;
+    --accent: #e0915c;
+    --k: #8fb8e0;
+    --s: #a9cf8a;
+    --n: #e0a36e;
+    --ok: #6fd08c;
+    --bad: #ff8a80;
+    --cm: #77736b;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { background: var(--bg); color: var(--fg); }
+
+body {
+  margin: 0 auto;
+  max-width: 52rem;
+  padding: 0 1.25rem 3rem;
+  font: 15px/1.6 var(--mono);
+}
+
+a { color: var(--accent); text-underline-offset: 0.2em; }
+
+header.site {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1.25rem;
+  padding: 1.25rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+header.site .brand {
+  font: italic 600 1.5rem/1 var(--serif);
+  color: var(--fg);
+  text-decoration: none;
+}
+header.site nav { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; flex: 1; }
+header.site nav a { color: var(--dim); text-decoration: none; }
+header.site nav a:hover, header.site nav a[aria-current] { color: var(--fg); }
+header.site nav a[aria-current] { text-decoration: underline; }
+header.site .twin { color: var(--dim); font-size: 0.85rem; }
+
+h1, h2, h3 { font-family: var(--serif); font-weight: 600; line-height: 1.2; }
+h1 { font-size: 2.6rem; font-style: italic; margin: 2.5rem 0 1rem; }
+h2 { font-size: 1.55rem; margin: 2.75rem 0 0.75rem; }
+h3 { font-size: 1.2rem; margin: 2rem 0 0.5rem; }
+
+main > p:first-of-type { font-size: 1.05rem; }
+
+code { font-family: var(--mono); font-size: 0.93em; }
+p code, li code, td code { background: var(--code-bg); padding: 0.05em 0.3em; border-radius: 3px; }
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+pre.lang-text { white-space: pre; }
+/* A JSON record is one line however long; wrap it rather than hide the
+   hint at its end. */
+pre.lang-console, pre.lang-jsonl, pre.lang-json { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* What the highlighter marks: keys, strings, numbers, "ok", comments,
+   Ovid keywords, types, and builtins, and a transcript's prompt. */
+.k { color: var(--k); }
+.s { color: var(--s); }
+.n { color: var(--n); }
+.ok { color: var(--ok); font-weight: 700; }
+.bad { color: var(--bad); font-weight: 700; }
+.cm { color: var(--cm); }
+.kw { color: var(--k); font-weight: 700; }
+.ty { color: var(--s); }
+.bi { color: var(--n); }
+.pr { color: var(--cm); user-select: none; }
+.cmd { color: var(--fg); font-weight: 700; }
+
+ul { padding-left: 1.25rem; }
+li { margin: 0.35rem 0; }
+
+.table { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 0.9rem; }
+th, td { text-align: left; vertical-align: top; padding: 0.35rem 0.9rem 0.35rem 0; border-bottom: 1px solid var(--rule); }
+th { color: var(--dim); font-weight: 400; }
+
+/* The footer is the page's own last line: its record, then how it was made. */
+footer {
+  margin-top: 4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--dim);
+  font-size: 0.82rem;
+}
+footer pre { background: none; border: none; padding: 0; margin: 0.5rem 0; }

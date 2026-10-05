@@ -1,0 +1,409 @@
+package md
+
+import ovid/io
+import ovid/mem
+import text
+
+// Doc is one page being rendered: its Markdown, the HTML and expanded
+// Markdown it becomes, and the first error, if any.
+//
+// The Markdown is a subset, and anything outside it is an error rather
+// than a guess: # ## ### headings, paragraphs, - lists, | tables, ```
+// fences (```lang include=path takes its body from a file), and inline
+// `code`, **bold**, and [links](url).
+type Doc struct {
+  src i64
+  n i64
+  pos i64
+  html *ovid/mem.Buf
+  md *ovid/mem.Buf
+  title *ovid/mem.Buf
+  desc *ovid/mem.Buf
+  copied bool
+  err i64
+  msg *ovid/mem.Buf
+  at i64
+}
+
+func New(io *ovid/io.Cap, src i64, n i64) *Doc {
+  var d *Doc = ovid/io.Alloc(io, sizeof(Doc)) as *Doc
+  d.src = src
+  d.n = n
+  d.html = ovid/mem.New(io, n * 2)
+  d.md = ovid/mem.New(io, n)
+  d.title = ovid/mem.New(io, 64)
+  d.desc = ovid/mem.New(io, 256)
+  d.msg = ovid/mem.New(io, 64)
+  return d
+}
+
+// Fail records the error code at offset at in the source, with the
+// message msg (both literals), unless an error is already recorded.
+func Fail(io *ovid/io.Cap, d *Doc, at i64, code i64, msg i64) i64 {
+  if d.err == 0 {
+    d.err = code
+    d.at = at
+    text.S(io, d.msg, msg)
+  }
+  return 1
+}
+
+// Render turns d's Markdown into d.html and d.md. It returns 0, or 1 with
+// d.err set.
+func Render(io *ovid/io.Cap, d *Doc) i64 {
+  while d.pos < d.n && d.err == 0 {
+    var start i64 = d.pos
+    d.copied = false
+    Block(io, d)
+    if !d.copied {
+      ovid/mem.WBytes(io, d.md, d.src + start, d.pos - start)
+    }
+  }
+  if d.err == 0 && d.title.len == 0 {
+    Fail(io, d, 0, strptr("no_title"), strptr("a page has a # title"))
+  }
+  if d.err != 0 {
+    return 1
+  }
+  return 0
+}
+
+// next moves past the line that ends at e.
+func next(d *Doc, e i64) i64 {
+  d.pos = e + 1
+  if d.pos > d.n {
+    d.pos = d.n
+  }
+  return 0
+}
+
+// end is where the line at d.pos ends.
+func end(d *Doc) i64 {
+  return text.LineEnd(d.src, d.n, d.pos)
+}
+
+// Block reads one block, or one blank line, at d.pos.
+func Block(io *ovid/io.Cap, d *Doc) i64 {
+  var e i64 = end(d)
+  var p i64 = d.src + d.pos
+  var n i64 = e - d.pos
+  if text.Blank(p, n) {
+    return next(d, e)
+  }
+  var why i64 = Unsupported(p, n)
+  if why != 0 {
+    return Fail(io, d, d.pos, strptr("unsupported_markdown"), why)
+  }
+  if text.Prefix(p, n, strptr("```"), 3) {
+    return Fence(io, d)
+  }
+  if load8(p) == text.HASH {
+    return Heading(io, d)
+  }
+  if load8(p) == text.PIPE {
+    return Table(io, d)
+  }
+  if text.Prefix(p, n, strptr("- "), 2) {
+    return List(io, d)
+  }
+  return Para(io, d)
+}
+
+// Unsupported is a message saying why the line of n bytes at p starts
+// something the subset leaves out, or 0.
+func Unsupported(p i64, n i64) i64 {
+  var c i64 = load8(p)
+  if c == text.GT {
+    return strptr("block quotes are not supported")
+  }
+  if text.Prefix(p, n, strptr("* "), 2) || text.Prefix(p, n, strptr("+ "), 2) {
+    return strptr("a list item starts with \"- \"")
+  }
+  if c == text.LT {
+    return strptr("raw HTML is not supported")
+  }
+  if text.Prefix(p, n, strptr("!["), 2) {
+    return strptr("images are not supported yet")
+  }
+  if text.Prefix(p, n, strptr("    "), 4) {
+    return strptr("indented code is not supported; fence it with ```")
+  }
+  if text.Prefix(p, n, strptr("---"), 3) || text.Prefix(p, n, strptr("***"), 3) {
+    return strptr("rules are not supported")
+  }
+  if c == text.TAB {
+    return strptr("indent with spaces, not tabs")
+  }
+  var i i64 = 0
+  while i < n && text.Digit(load8(p + i)) {
+    i = i + 1
+  }
+  if i > 0 && text.Prefix(p + i, n - i, strptr(". "), 2) {
+    return strptr("numbered lists are not supported yet")
+  }
+  return 0
+}
+
+// starts is true when the line of n bytes at p ends a paragraph: it is
+// blank or starts another block.
+func starts(p i64, n i64) bool {
+  if text.Blank(p, n) || Unsupported(p, n) != 0 {
+    return true
+  }
+  var c i64 = load8(p)
+  return c == text.HASH || c == text.PIPE || text.Prefix(p, n, strptr("```"), 3) || text.Prefix(p, n, strptr("- "), 2)
+}
+
+// spans renders the inline Markdown of n bytes at p (in d.src) into b,
+// recording an error in d.
+func spans(io *ovid/io.Cap, d *Doc, b *ovid/mem.Buf, p i64, n i64, html bool) i64 {
+  var bad i64 = Inline(io, b, p, n, html)
+  if bad < 0 {
+    return 0
+  }
+  if load8(p + bad) == text.BQ {
+    return Fail(io, d, (p + bad) - d.src, strptr("unclosed_code"), strptr("this ` has no closing `"))
+  }
+  return Fail(io, d, (p + bad) - d.src, strptr("unclosed_bold"), strptr("this ** has no closing **"))
+}
+
+func Heading(io *ovid/io.Cap, d *Doc) i64 {
+  var e i64 = end(d)
+  var p i64 = d.src + d.pos
+  var n i64 = e - d.pos
+  var h i64 = 0
+  while h < n && load8(p + h) == text.HASH {
+    h = h + 1
+  }
+  if h > 3 || h >= n || load8(p + h) != text.SP {
+    return Fail(io, d, d.pos, strptr("bad_heading"), strptr("a heading is #, ##, or ### and a space"))
+  }
+  var t i64 = (p + h) + 1
+  var tn i64 = text.Trail(t, (n - h) - 1)
+  var plain *ovid/mem.Buf = ovid/mem.New(io, tn)
+  spans(io, d, plain, t, tn, false)
+  if h == 1 && d.title.len == 0 {
+    ovid/mem.WBytes(io, d.title, plain.data, plain.len)
+  }
+  text.S(io, d.html, strptr("<h"))
+  text.Int(io, d.html, h)
+  text.S(io, d.html, strptr(" id=\""))
+  text.Slug(io, d.html, plain.data, plain.len)
+  text.S(io, d.html, strptr("\">"))
+  spans(io, d, d.html, t, tn, true)
+  text.S(io, d.html, strptr("</h"))
+  text.Int(io, d.html, h)
+  text.S(io, d.html, strptr(">\n"))
+  return next(d, e)
+}
+
+// Para reads a paragraph: lines up to a blank one or another block. The
+// page's first paragraph after its title is its description.
+func Para(io *ovid/io.Cap, d *Doc) i64 {
+  var start i64 = d.pos
+  var stop i64 = d.pos
+  var more bool = true
+  while more {
+    stop = end(d)
+    next(d, stop)
+    more = d.pos < d.n && !starts(d.src + d.pos, end(d) - d.pos)
+  }
+  var p i64 = d.src + start
+  var n i64 = stop - start
+  text.S(io, d.html, strptr("<p>"))
+  spans(io, d, d.html, p, n, true)
+  text.S(io, d.html, strptr("</p>\n"))
+  if d.desc.len == 0 && d.title.len > 0 {
+    spans(io, d, d.desc, p, n, false)
+    var i i64 = 0
+    while i < d.desc.len {
+      if load8(d.desc.data + i) == text.NL {
+        store8(d.desc.data + i, text.SP)
+      }
+      i = i + 1
+    }
+  }
+  return 0
+}
+
+// List reads a - list. An item goes on over lines indented two spaces.
+func List(io *ovid/io.Cap, d *Doc) i64 {
+  text.S(io, d.html, strptr("<ul>\n"))
+  while d.pos < d.n && d.err == 0 && text.Prefix(d.src + d.pos, end(d) - d.pos, strptr("- "), 2) {
+    var start i64 = d.pos + 2
+    var stop i64 = end(d)
+    next(d, stop)
+    while d.pos < d.n && d.err == 0 && item(d.src + d.pos, end(d) - d.pos) {
+      if text.Prefix(d.src + d.pos, end(d) - d.pos, strptr("  - "), 4) {
+        Fail(io, d, d.pos + 2, strptr("unsupported_markdown"), strptr("nested lists are not supported yet"))
+      }
+      stop = end(d)
+      next(d, stop)
+    }
+    text.S(io, d.html, strptr("<li>"))
+    spans(io, d, d.html, d.src + start, stop - start, true)
+    text.S(io, d.html, strptr("</li>\n"))
+  }
+  text.S(io, d.html, strptr("</ul>\n"))
+  return 0
+}
+
+// item is true when the line of n bytes at p goes on a list item.
+func item(p i64, n i64) bool {
+  return text.Prefix(p, n, strptr("  "), 2) && !text.Blank(p, n)
+}
+
+// Table reads a | table: a header row, a |---| row, and body rows.
+func Table(io *ovid/io.Cap, d *Doc) i64 {
+  var head i64 = d.pos
+  var headn i64 = end(d) - d.pos
+  next(d, end(d))
+  var p i64 = d.src + d.pos
+  var n i64 = end(d) - d.pos
+  if d.pos >= d.n || !rule(p, n) {
+    return Fail(io, d, d.pos, strptr("bad_table"), strptr("a table's second row is |---|---|"))
+  }
+  next(d, end(d))
+  text.S(io, d.html, strptr("<div class=\"table\"><table>\n<thead><tr>"))
+  Row(io, d, d.src + head, headn, true)
+  text.S(io, d.html, strptr("</tr></thead>\n<tbody>\n"))
+  while d.pos < d.n && d.err == 0 && load8(d.src + d.pos) == text.PIPE {
+    text.S(io, d.html, strptr("<tr>"))
+    Row(io, d, d.src + d.pos, end(d) - d.pos, false)
+    text.S(io, d.html, strptr("</tr>\n"))
+    next(d, end(d))
+  }
+  text.S(io, d.html, strptr("</tbody></table></div>\n"))
+  return 0
+}
+
+// rule is true for a table's |---|:--| row.
+func rule(p i64, n i64) bool {
+  if n == 0 || load8(p) != text.PIPE {
+    return false
+  }
+  var i i64 = 0
+  var c i64 = 0
+  while i < n {
+    c = load8(p + i)
+    if c != text.PIPE && c != text.DASH && c != text.COLON && c != text.SP && c != text.CR {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+// Row renders the cells of one table row of n bytes at p. A \| is a |
+// inside a cell.
+func Row(io *ovid/io.Cap, d *Doc, p i64, n i64, head bool) i64 {
+  n = text.Trail(p, n)
+  var i i64 = 1
+  var cs i64 = 1
+  while i <= n {
+    var c i64 = text.PIPE
+    if i < n {
+      c = load8(p + i)
+    }
+    if c == text.BSL && (i + 1) < n && load8((p + i) + 1) == text.PIPE {
+      i = i + 2
+    } else if c == text.PIPE {
+      if i > cs || i < n {
+        cell(io, d, p + cs, i - cs, head)
+      }
+      cs = i + 1
+      i = i + 1
+    } else {
+      i = i + 1
+    }
+  }
+  return 0
+}
+
+func cell(io *ovid/io.Cap, d *Doc, p i64, n i64, head bool) i64 {
+  var l i64 = text.Lead(p, n)
+  p = p + l
+  n = text.Trail(p, n - l)
+  if head {
+    text.S(io, d.html, strptr("<th>"))
+  } else {
+    text.S(io, d.html, strptr("<td>"))
+  }
+  spans(io, d, d.html, p, n, true)
+  if head {
+    text.S(io, d.html, strptr("</th>"))
+  } else {
+    text.S(io, d.html, strptr("</td>"))
+  }
+  return 0
+}
+
+// Fence reads a ``` block. Its info is a language and, optionally,
+// include=path: the body then comes from that file, and the expanded
+// Markdown has it in place of the include.
+func Fence(io *ovid/io.Cap, d *Doc) i64 {
+  var at i64 = d.pos
+  var e i64 = end(d)
+  var info i64 = (d.src + d.pos) + 3
+  var infon i64 = text.Trail(info, (e - d.pos) - 3)
+  var l i64 = text.Lead(info, infon)
+  info = info + l
+  infon = infon - l
+  var lang i64 = info
+  var langn i64 = text.Find(info, infon, 0, text.SP)
+  if langn < 0 {
+    langn = infon
+  }
+  if langn == 0 {
+    lang = strptr("text")
+    langn = strlen("text")
+  }
+  next(d, e)
+  var body i64 = d.pos
+  var stop i64 = -1
+  while d.pos < d.n && stop < 0 {
+    e = end(d)
+    if text.Is(d.src + d.pos, text.Trail(d.src + d.pos, e - d.pos), strptr("```"), 3) {
+      stop = d.pos
+    }
+    next(d, e)
+  }
+  if stop < 0 {
+    return Fail(io, d, at, strptr("unclosed_fence"), strptr("this ``` has no closing ```"))
+  }
+  var bp i64 = d.src + body
+  var bn i64 = text.Trail(bp, stop - body)
+  var inc i64 = info + langn
+  var incn i64 = text.Trail(inc, infon - langn)
+  l = text.Lead(inc, incn)
+  inc = inc + l
+  incn = incn - l
+  if incn > 0 {
+    if !text.Prefix(inc, incn, strptr("include="), 8) {
+      return Fail(io, d, at + 3, strptr("bad_fence"), strptr("after a fence's language comes only include=path"))
+    }
+    if bn > 0 {
+      return Fail(io, d, at, strptr("bad_fence"), strptr("an include fence has no body of its own"))
+    }
+    var f *text.Span = text.ReadFile(io, inc + 8, incn - 8)
+    if f.n < 0 {
+      Fail(io, d, (inc + 8) - d.src, strptr("include_not_found"), strptr("cannot read "))
+      ovid/mem.WBytes(io, d.msg, inc + 8, incn - 8)
+      return 1
+    }
+    bp = f.p
+    bn = text.Trail(f.p, f.n)
+    text.S(io, d.md, strptr("```"))
+    ovid/mem.WBytes(io, d.md, lang, langn)
+    text.S(io, d.md, strptr("\n"))
+    ovid/mem.WBytes(io, d.md, bp, bn)
+    text.S(io, d.md, strptr("\n```\n"))
+    d.copied = true
+  }
+  text.S(io, d.html, strptr("<pre class=\"lang-"))
+  text.Html(io, d.html, lang, langn)
+  text.S(io, d.html, strptr("\"><code>"))
+  Highlight(io, d.html, lang, langn, bp, bn)
+  text.S(io, d.html, strptr("</code></pre>\n"))
+  return 0
+}
