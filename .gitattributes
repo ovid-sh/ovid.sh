@@ -1,0 +1,3 @@
+# GitHub's Linguist has no Ovid yet: highlight .ov as Go, whose keywords it
+# shares, and leave it out of the language stats rather than count it as Go.
+*.ov linguist-language=Go linguist-detectable=false
